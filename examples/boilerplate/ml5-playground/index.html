@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>ML5 WebXR Playground • A-Frame</title>
+    <meta name="description" content="ML5 WebXR Playground • A-Frame">
+    <script src="../../../dist/aframe-master.js"></script>
+    <script src="https://unpkg.com/ml5@latest/dist/ml5.min.js"></script>
+  </head>
+  <body>
+    <a-scene vr-mode-ui="enabled: true">
+      <a-assets>
+        <video id="video" autoplay playsinline webkit-playsinline muted></video>
+      </a-assets>
+
+      <a-plane src="#video" position="0 1.5 -2" width="1.6" height="0.9"></a-plane>
+      <a-text id="label" value="Loading…" position="-0.7 0.5 -1" color="#FFF"></a-text>
+    </a-scene>
+
+    <script>
+      const video = document.getElementById('video');
+
+      navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+        video.srcObject = stream;
+      });
+
+      const classifier = ml5.imageClassifier('MobileNet', () => {
+        classify();
+      });
+
+      function classify () {
+        classifier.classify(video, (err, results) => {
+          if (err) {
+            console.error(err);
+            return;
+          }
+          document.getElementById('label').setAttribute('value', results[0].label);
+          classify();
+        });
+      }
+    </script>
+  </body>
+</html>
