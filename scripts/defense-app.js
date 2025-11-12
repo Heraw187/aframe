@@ -1,75 +1,131 @@
 /**
- * Simple defense utility to detect unexpected DOM overlays and content rewrites.
- *
- * This script installs MutationObservers and network wrappers to log potential
- * tampering attempts such as injected overlays (e.g. high z-index elements
- * covering the page) and rewriting of critical DOM nodes (like `.markdown`).
+ * Defense utility to detect unexpected DOM overlays, content rewrites, and
+ * suspicious network failures. In addition to console warnings, detections are
+ * published via the `defense-app:alert` CustomEvent and mirrored onto the
+ * global `window.__defenseAppEvents` array for late subscribers.
  *
  * Usage: include this file on a page or paste its contents into the browser
- * console. Alerts will be logged to the developer console.
+ * console. Listen for `defense-app:alert` to receive structured notifications.
  */
-/* global MutationObserver HTMLElement XMLHttpRequest window document */
-(function () {
-  function logSuspect (msg, context) {
-    console.warn('[DefenseApp]', msg, context);
+/* global MutationObserver HTMLElement window CustomEvent */
+(function (global) {
+  const EVENT_NAME = 'defense-app:alert';
+  const queueKey = '__defenseAppEvents';
+  const root = global.document && global.document.documentElement;
+
+  if (!Array.isArray(global[queueKey])) {
+    Object.defineProperty(global, queueKey, {
+      value: [],
+      writable: false,
+      configurable: false,
+      enumerable: false
+    });
   }
 
-  // Detect high z-index overlays and modifications to content containers.
+  function pushEvent (detail) {
+    const payload = Object.assign({
+      kind: detail && detail.kind ? detail.kind : 'general',
+      message: detail && detail.message ? detail.message : 'Defense event',
+      context: detail ? detail.context : undefined,
+      timestamp: new Date().toISOString()
+    }, detail);
+
+    try {
+      global[queueKey].push(payload);
+    } catch (err) {
+      // Ignore attempts to mutate the queue if it was reconfigured by a host.
+    }
+
+    try {
+      global.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: payload }));
+    } catch (err) {
+      // CustomEvent may be unavailable in extremely old environments.
+    }
+
+    const label = `[DefenseApp:${payload.kind}]`;
+    if (payload.kind === 'network') {
+      console.warn(label, payload.message, payload.context);
+    } else {
+      console.log(label, payload.message, payload.context || '');
+    }
+  }
+
+  if (!root) {
+    pushEvent({ kind: 'error', message: 'Document root unavailable — DOM monitoring disabled.' });
+    return;
+  }
+
+  function inspectNode (node, reason) {
+    if (!(node instanceof HTMLElement)) return;
+    const style = global.getComputedStyle(node);
+    const zIndex = parseInt(style.zIndex, 10);
+    const coversViewport = node.offsetWidth > global.innerWidth * 0.5 ||
+      node.offsetHeight > global.innerHeight * 0.5;
+
+    if (zIndex > 1000 && coversViewport) {
+      pushEvent({ kind: 'overlay', message: 'High z-index overlay detected.', context: { node, reason, zIndex } });
+    }
+
+    if (typeof node.matches === 'function' && node.matches('div.markdown, [data-defensive-watch="markdown"]')) {
+      pushEvent({ kind: 'mutation', message: 'Potential content rewrite observed.', context: { node, reason } });
+    }
+  }
+
   const observer = new MutationObserver(mutations => {
-    mutations.forEach(m => {
-      if (m.type === 'childList') {
-        m.addedNodes.forEach(checkNode);
+    mutations.forEach(mutation => {
+      if (mutation.type === 'childList') {
+        mutation.addedNodes.forEach(node => inspectNode(node, 'childList'));
       }
-      if (m.type === 'attributes') {
-        checkNode(m.target);
+      if (mutation.type === 'attributes') {
+        inspectNode(mutation.target, `attribute:${mutation.attributeName}`);
       }
     });
   });
 
-  function checkNode (node) {
-    if (!(node instanceof HTMLElement)) return;
-    const style = window.getComputedStyle(node);
-    const z = parseInt(style.zIndex, 10);
-    const large = node.offsetWidth > window.innerWidth * 0.5 ||
-      node.offsetHeight > window.innerHeight * 0.5;
-    if (z > 1000 && large) {
-      logSuspect('Overlay detected', node);
-    }
-    if (node.matches && node.matches('div.markdown')) {
-      logSuspect('Content rewrite detected', node);
-    }
-  }
-
-  observer.observe(document.documentElement, {
+  observer.observe(root, {
     childList: true,
     attributes: true,
     subtree: true,
     attributeFilter: ['style', 'class']
   });
 
-  // Wrap fetch to monitor network errors.
-  const origFetch = window.fetch;
-  window.fetch = async function (...args) {
-    try {
-      const res = await origFetch.apply(this, args);
-      if (!res.ok) {
-        logSuspect('Fetch returned non-OK status', { url: res.url, status: res.status });
+  const origFetch = typeof global.fetch === 'function' ? global.fetch.bind(global) : null;
+  if (origFetch) {
+    global.fetch = async function (...args) {
+      try {
+        const response = await origFetch(...args);
+        if (!response.ok) {
+          pushEvent({
+            kind: 'network',
+            message: 'Fetch returned non-OK status.',
+            context: { url: response.url, status: response.status }
+          });
+        }
+        return response;
+      } catch (err) {
+        pushEvent({
+          kind: 'network',
+          message: 'Fetch failed.',
+          context: { args, error: err }
+        });
+        throw err;
       }
-      return res;
-    } catch (err) {
-      logSuspect('Fetch failed', { args, err });
-      throw err;
-    }
-  };
+    };
+  }
 
-  // Wrap XMLHttpRequest for additional visibility.
-  const origOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (...args) {
-    this.addEventListener('error', () => {
-      logSuspect('XHR failed', { method: args[0], url: args[1] });
-    });
-    return origOpen.apply(this, args);
-  };
+  const origOpen = global.XMLHttpRequest && global.XMLHttpRequest.prototype.open;
+  if (origOpen) {
+    global.XMLHttpRequest.prototype.open = function (...args) {
+      this.addEventListener('error', () => {
+        pushEvent({
+          kind: 'network',
+          message: 'XMLHttpRequest error.',
+          context: { method: args[0], url: args[1] }
+        });
+      });
+      return origOpen.apply(this, args);
+    };
+  }
 
-  console.log('[DefenseApp] Monitoring DOM and network for tampering.');
-})();
+  pushEvent({ kind: 'init', message: 'Monitoring DOM and network for tampering.' });
+})(window);
