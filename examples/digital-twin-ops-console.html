@@ -320,12 +320,31 @@
             }
         };
 
+        const supportsSubtleCrypto = typeof crypto !== 'undefined' && crypto.subtle && typeof TextEncoder !== 'undefined';
+        let warnedAboutFallback = false;
+
+        function fnv1a(input) {
+            let hash = 0x811c9dc5;
+            for (let i = 0; i < input.length; i++) {
+                hash ^= input.charCodeAt(i);
+                hash = (hash >>> 0) * 0x01000193;
+            }
+            return ('0000000' + (hash >>> 0).toString(16)).slice(-8);
+        }
+
         async function hashContent(input) {
-            const encoder = new TextEncoder();
-            const data = encoder.encode(input);
-            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-            const hashArray = Array.from(new Uint8Array(hashBuffer));
-            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+            if (supportsSubtleCrypto) {
+                const encoder = new TextEncoder();
+                const data = encoder.encode(input);
+                const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+            }
+            if (!warnedAboutFallback) {
+                warnedAboutFallback = true;
+                status('Secure hashing unavailable in this context; using FNV-1a fallback.', 'System', '⚠️');
+            }
+            return fnv1a(input);
         }
 
         function sanitizePrompt(input) {
@@ -605,7 +624,12 @@
             const finalJsonString = JSON.stringify(json, null, 2);
             const blob = new Blob([finalJsonString], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
-            window.open(url, '_blank');
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = 'forensic-report.json';
+            anchor.rel = 'noopener';
+            anchor.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1500);
             status('Export complete. Forensic Report JSON opened.', 'System', '✅');
 
             populatePdfTemplate(json, artifactHash, reportHash, signatureDigests);
